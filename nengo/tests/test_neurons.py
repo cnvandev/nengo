@@ -43,7 +43,7 @@ def test_lif_builtin():
     assert np.allclose(sim_rates, math_rates, atol=1, rtol=0.02)
 
 
-@pytest.mark.skipif(True, reason="Need to figure out a way to get sig_out")
+@pytest.mark.skipif("True", reason="Need to figure out a way to get sig_out")
 def test_lif_base(nl_nodirect):
     """Test that the dynamic model approximately matches the rates"""
     rng = np.random.RandomState(85243)
