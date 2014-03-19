@@ -647,9 +647,7 @@ class SimLIF(Operator):
 
 
 class SimLIFRate(Operator):
-    """
-    Set output to spike rates of an LIF model.
-    """
+    """Set output to spike rates of an LIF model."""
 
     def __init__(self, output, J, nl):
         self.output = output
@@ -668,6 +666,52 @@ class SimLIFRate(Operator):
 
         def step():
             output[...] = rates_fn(dt, J)
+        return step
+
+
+class SimOJA(Operator):
+    """Change the transform according to the OJA rule."""
+
+    def __init__(self, transform, gain, delta, pre_filtered, post_filtered,
+                 normalization, learning_signal, learning_rate, scale):
+        self.transform = transform
+        self.gain = gain
+        self.delta = delta
+        self.post_filtered = post_filtered
+        self.pre_filtered = pre_filtered
+        self.normalization = normalization
+        self.learning_signal = learning_signal
+        self.learning_rate = learning_rate
+        self.scale = scale
+
+        self.reads = [pre_filtered, post_filtered, learning_signal]
+        self.updates = [transform, delta, normalization]
+        self.sets = []
+        self.incs = []
+
+    def init_sigdict(self, sigdict, dt):
+        Operator.init_sigdict(self, sigdict, dt)
+        sigdict[self.delta] = np.zeros(
+            self.delta.shape, dtype=self.delta.dtype)
+        sigdict[self.normalization] = np.zeros(
+            self.normalization.shape, dtype=self.normalization.dtype)
+
+    def make_step(self, dct, dt):
+        transform = dct[self.transform]
+        delta = dct[self.delta]
+        pre_filtered = dct[self.pre_filtered]
+        post_filtered = dct[self.post_filtered]
+        normalization = dct[self.normalization]
+        learning_signal = dct[self.learning_signal]
+        learning_rate = self.learning_rate
+
+        def step():
+            post_squared = post_filtered * post_filtered
+            for i in range(len(post_squared)):
+                normalization[i, :] = transform[i, :] * post_squared[i]
+            delta[...] = np.outer(post_filtered, pre_filtered)
+            transform[...] += learning_rate * learning_signal * (
+                self.gain * delta - self.scale * normalization)
         return step
 
 
@@ -749,6 +793,12 @@ class Builder(object):
         logger.info("Building connections")
         for c in self.model.connections:
             self._builders[c.__class__](c)
+
+        # 4. Then learning rules
+        logger.info("Building learning rules")
+        for c in self.model.connections:
+            if c.learning_rule is not None:
+                self._builders[c.learning_rule.__class__](c.learning_rule)
 
         return self.model
 
@@ -914,7 +964,7 @@ class Builder(object):
             # Make a new signal, effectively detaching from post
             conn.output_signal = Signal(np.zeros(conn.output_signal.size),
                                         name=conn.label + ".mod_output")
-            # Add reset operator?
+            self.model.operators.append(Reset(conn.output_signal))
         dt = self.model.dt
 
         # Figure out the signal going across this connection
@@ -974,11 +1024,11 @@ class Builder(object):
         transform = np.array(conn.transform_full, dtype=np.float64, copy=True)
         if isinstance(conn.post, nengo.nonlinearities.Neurons):
             transform *= conn.post.gain[:, np.newaxis]
-        self.model.operators.append(
-            DotInc(Signal(transform, name=conn.label + ".transform"),
-                   conn.signal,
-                   conn.output_signal,
-                   tag=conn.label))
+        conn.transform_signal = Signal(
+            transform, name=conn.label + ".transform")
+        self.model.operators.append(DotInc(
+            conn.transform_signal,
+            conn.signal, conn.output_signal, tag=conn.label))
 
         # Set up probes
         for probe in conn.probes['signal']:
@@ -1049,3 +1099,55 @@ class Builder(object):
                    nl=lif,
                    voltage=lif.voltage,
                    refractory_time=lif.refractory_time))
+
+    @builds(nengo.PES)
+    def build_pes(self, pes):
+        activities = pes.connection.pre.neurons.output_signal
+        error = pes.error_connection.output_signal
+        scaled_error = Signal(np.zeros(error.shape), name="PES:scaled_error")
+        shaped_scaled_error = SignalView(scaled_error, (error.size, 1), (1, 1),
+                                         0, name="PES:shaped_scaled_erro")
+        shaped_activities = SignalView(activities, (1, activities.size),
+                                       (1, 1), 0, name="PES:shaped_activites")
+
+        decoders = pes.connection.decoder_signal
+        lr_signal = Signal(pes.learning_rate, name="PES:learning_rate")
+
+        self.model.operators.append(Reset(scaled_error))
+        self.model.operators.append(
+            DotInc(lr_signal, error, scaled_error, tag="PES:scale error"))
+        self.model.operators.append(
+            ProdUpdate(shaped_scaled_error, shaped_activities,
+                       Signal(1, name="ONE"), decoders,
+                       tag="PES:Update Decoder"))
+
+    @builds(nengo.OJA)
+    def build_oja(self, oja):
+        pre_activities = oja.connection.pre.output_signal
+        post_activities = oja.connection.post.output_signal
+
+        pre_filtered = self._filtered_signal(pre_activities, oja.pre_tau)
+        post_filtered = self._filtered_signal(post_activities, oja.post_tau)
+
+        delta = Signal(np.zeros((oja.connection.post.n_neurons,
+                                 oja.connection.pre.n_neurons)), name="delta")
+
+        normalization = Signal(np.zeros((oja.connection.post.n_neurons,
+                                         oja.connection.pre.n_neurons)),
+                               name="normalization")
+
+        if oja.learning:
+            learning_signal = oja.learning_connection.output_signal
+        else:
+            learning_signal = Signal(1, name="ONE")
+
+        self.model.operators.append(
+            SimOJA(transform=oja.connection.transform_signal,
+                   gain=oja.connection.post.gain[:, np.newaxis],
+                   delta=delta,
+                   pre_filtered=pre_filtered,
+                   post_filtered=post_filtered,
+                   normalization=normalization,
+                   learning_signal=learning_signal,
+                   learning_rate=oja.learning_rate,
+                   scale=oja.scale))

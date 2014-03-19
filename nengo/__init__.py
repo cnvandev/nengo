@@ -20,7 +20,7 @@ import sys
 # Nengo namespace (API)
 from .model import Model
 from .nonlinearities import PythonFunction, LIF, LIFRate, Direct
-from .objects import Ensemble, Node, Connection, Probe, Network
+from .objects import Ensemble, Node, Connection, Probe, Network, PES, OJA
 from . import networks
 from .simulator import Simulator
 from .utils.logging import log
