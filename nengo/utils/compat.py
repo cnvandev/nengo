@@ -3,7 +3,7 @@ import collections
 try:
     from collections import OrderedDict
 except ImportError:
-    from ordereddict import OrderedDict
+    from ordereddict import OrderedDict  # noqa: F401
 import sys
 
 IS_PYTHON3 = sys.version_info[0] == 3
